@@ -80,7 +80,7 @@ int main()
 
             if (i == frames[j].len) {
             	if (k < 8) {
-            		word.rxd = replace_byte(word.rxd, 0xfd, k); 
+            		word.rxd = replace_byte(word.rxd, 0xfd, k);
             	}
             }
             xgmii.write(word);
@@ -98,14 +98,41 @@ int main()
 
     receive(xgmii, s_axis, &rx_status);
 
-    while(!s_axis.empty()) {
-    	t_axis din=s_axis.read();
-    	printf("DATA 0x%016lx, KEEP 0x%02x, LAST %d, USER %d\n", din.data.to_long(), din.keep.to_int(), din.last.to_int(), din.user.to_int());
+    printf("*****************************************************************\n");
+    printf("RECEIVED FRAMES\n");
+    printf("*****************************************************************\n");
+    t_axis m_axis;
+    while (!s_axis.empty()) {
+        t_axis din=s_axis.read();
+        printf("DATA 0x%016lx, KEEP 0x%02x, LAST %d, USER %d\n", din.data.to_long(), din.keep.to_int(), din.last.to_int(), din.user.to_int());
+        if (din.last) {
+
+            if((!m_axis.user) && (!rx_status.fcs_err) && (!rx_status.len_err)){
+                correct_frames++;
+            }
+            printf("*****************************************************************\n");
+            printf("Frame status: count=%d, good=%d, under=%d, len_err=%d, fcs_err=%d, data_err=%d, over=%d\n",
+                      rx_status.count.to_int(),
+                                      rx_status.good.to_int(),
+                                      rx_status.under.to_int(),
+                                      rx_status.len_err.to_int(),
+                                      rx_status.fcs_err.to_int(),
+                                      rx_status.data_err.to_int(),
+                                      rx_status.over.to_int()
+                );
+            printf("*****************************************************************\n");
+        }
     }
+
+    printf("*****************************************************************\n");
+    if (correct_frames < FRAMES_CNT) {
+        printf("FRAME ERROR %d/%d\n", FRAMES_CNT-correct_frames, FRAMES_CNT);
+        return 0;
+    }
+
+    printf("Frame correct %d/%d\n", FRAMES_CNT,FRAMES_CNT);
+    printf("*****************************************************************\n");
 
     return 0;
 
 }
-
-  
-

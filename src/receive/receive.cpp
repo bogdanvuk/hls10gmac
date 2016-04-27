@@ -20,6 +20,7 @@ static ap_shift_reg<t_s_xgmii, 5> pipeline;
 #define replace_byte(w, b, pos) ((w) & (~(0xffL << (pos)*8))) | ((((ap_uint<64>) b) & 0xff) << (pos)*8)
 #define wbit(w, pos) (((w) >> (pos)) & 0x1)
 #define wbyte(w, pos) (((w) >> (8*pos)) & 0xff)
+#define mask_up_to_bit(w, pos) (((ap_uint<w>) -1) >> (w - pos - 1))
 
 void receive(
              hls::stream<t_s_xgmii> &s_xgmii,
@@ -41,25 +42,29 @@ void receive(
 	t_s_xgmii cur = {0, 0};
 	t_s_xgmii precur = {0, 0};
     t_s_xgmii last_word;
-    ap_uint<8> last_data_mask = 0x00;
+    ap_uint<8> last_user_word_mask = 0x00;
     ap_uint<8> crc_field_mask = 0x00;
-
+    int last_user_word_pos;
+    ap_uint<3> last_user_byte_lane;
+    int frame_end_detected = 0;
+    int user_data_end_detected = 0;
+	int last_user_byte_lane_before_frame_end;
  MAIN: while (1) {
 
-     if (last_data_mask) {
-    	int fcs_err = (crc_state != 0xDEBB20E3);
+     if (user_data_end_detected) {
+    	int fcs_err = (crc_state != 0x00000000);
 		int len_err = 0;
-		int under = (frm_cnt < 64);
-		int over = (frm_cnt > 1500);
+		int frm_byte_cnt = frm_cnt*8 + last_user_byte_lane_before_frame_end + 1 + 4;
+		int under = (frm_byte_cnt < 64);
+		int over = (frm_byte_cnt > 1500);
 
 		if (is_len(len_type)) {
-		len_err = (len_type != usr_cnt);
-
+			len_err = (len_type != ((last_user_word_pos - 2) * 8 + 2 + last_user_byte_lane + 1));
 		}
 
 		int good = !(fcs_err | len_err | data_err | under | over);
 
-		m_axis.write((t_axis){last_word.rxd, last_data_mask, !good, 1});
+		m_axis.write((t_axis){last_word.rxd, mask_up_to_bit(8, last_user_byte_lane), !good, 1});
 		*rx_status = (t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over};
      }
 
@@ -83,62 +88,83 @@ void receive(
 		if (!s_xgmii.read_nb(precur)) return;
         printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
 
-        int frame_end_detected = 0;
-        int last = 0;
-        last_data_mask = 0xff;
+        frame_end_detected = 0;
+        user_data_end_detected = 0;
+        last_user_word_mask = 0xff;
     USER_DATA: do {
 #pragma HLS LATENCY max=0 min=0
-            // if (frm_cnt < 14) {
-            // 	m_axis.write((t_axis){cur.rxd, 0, 0});
-            // 	if (frm_cnt == 12) {
-            // 		len_type = (len_type & 0xff00) | cur.rxd;
-            // 	} else if (frm_cnt == 13) {
-            // 		len_type = (len_type << 8) | cur.rxd;
-            // 	}
-            // } else {
-            //     if (output_en) {
-            //         if (din.dv && (len_type != 0) && (usr_cnt < len_type - 1)) {
-            //             usr_cnt++;
-            //             m_axis.write((t_axis){cur.rxd, 0, 0});
-            //         } else {
-            //             usr_cnt++;
-            //             last = cur;
-            //             output_en = 0;
-            //         }
-            //     }
-            // }
-
-            if (!last) {
-                if (cur.rxc != 0x00) {
-                    switch(cur.rxc) {
-            		case 0xe0 : last_data_mask = 0x01; crc_field_mask = 0x1e; break;
-            		case 0xc0 : last_data_mask = 0x03; crc_field_mask = 0x3c; break;
-            		case 0x80 : last_data_mask = 0x07; crc_field_mask = 0x78; break;
-            		default: last_data_mask = 0x00; break;
-                    }
-                    frame_end_detected = 1;
-                    last_word = cur;
-                    last = 1;
-                } else if ((precur.rxc != 0x00) && ((ap_uint<8>) ~precur.rxc <= 0x0f)) {
-                    switch(precur.rxc) {
-            		case 0xf0 : last_data_mask = 0xff; break;
-            		case 0xf8 : last_data_mask = 0x7f; crc_field_mask = 0x80; break;
-            		case 0xfc : last_data_mask = 0x3f; crc_field_mask = 0xc0; break;
-            		case 0xfe : last_data_mask = 0x1f; crc_field_mask = 0xe0; break;
-            		case 0xff : last_data_mask = 0x0f; crc_field_mask = 0xf0; frame_end_detected = 1; break;
-            		default: last_data_mask = 0x00; break;
-                    }
-                    last_word = cur;
-                    last = 1;
-                } else {
-                	crc_field_mask = 0x00;
+    		// END-OF-FRAME detection
+            if (cur.rxc != 0x00) {
+                switch(cur.rxc) {
+                case 0xe0 : last_user_byte_lane_before_frame_end = 0; crc_field_mask = 0x1e; break;
+                case 0xc0 : last_user_byte_lane_before_frame_end = 1; crc_field_mask = 0x3c; break;
+                case 0x80 : last_user_byte_lane_before_frame_end = 2; crc_field_mask = 0x78; break;
+                default: crc_field_mask = 0xff; break;
                 }
-            } else {
                 frame_end_detected = 1;
-                crc_field_mask = 0xff;
+                if (!user_data_end_detected) {
+                    last_word = cur;
+                    last_user_byte_lane = last_user_byte_lane_before_frame_end;
+                }
+                user_data_end_detected = 1;
+            } else if ((precur.rxc != 0x00) && ((ap_uint<8>) ~precur.rxc <= 0x0f)) {
+                switch(precur.rxc) {
+                case 0xf0 : last_user_byte_lane_before_frame_end = 7; break;
+                case 0xf8 : last_user_byte_lane_before_frame_end = 6; crc_field_mask = 0x80; break;
+                case 0xfc : last_user_byte_lane_before_frame_end = 5; crc_field_mask = 0xc0; break;
+                case 0xfe : last_user_byte_lane_before_frame_end = 4; crc_field_mask = 0xe0; break;
+                case 0xff : last_user_byte_lane_before_frame_end = 3; crc_field_mask = 0xf0; frame_end_detected = 1; break;
+                }
+                if (!user_data_end_detected) {
+                    last_word = cur;
+                    last_user_byte_lane = last_user_byte_lane_before_frame_end;
+                }
+                user_data_end_detected = 1;
+            } else {
+                crc_field_mask = 0x00;
             }
 
-    		if (!last) {
+            // END-OF-USER-DATA detection
+            if (!user_data_end_detected) {
+				if (frm_cnt == 1) {
+					len_type = ((ap_uint<16>) wbyte(cur.rxd, 4) << 8) | wbyte(cur.rxd, 5);
+					if (is_len(len_type)) {
+						// Calculate the position of the last word within the frame
+						// which contains valid user data (based on LENGTH/TYPE field
+						// value. -3 is subtracted before division because first two
+						// bytes of user data are not word aligned, and 1 is subtracted
+						// additionally since we want to find out the last word that
+						// still contains data, not the number of user data words. +2
+						// since first word aligned user data byte starts at word #2.
+						last_user_word_pos = (len_type - 3) / 8 + 2;
+						last_user_byte_lane = (len_type - 3) % 8;
+
+						if (len_type <= 2) {
+							user_data_end_detected = 1;
+							last_word = cur;
+						}
+
+						// Special case for the first two user data bytes which are
+						// contained in the same word as LENGTH/TYPE field. The mask
+						// is and-ed with previous value, since it was maybe already
+						// setup by the end-of-frame detection unit.
+	//					switch(len_type) {
+	//					case 0x0000: last_user_byte_lane = ; user_data_end_detected = 1; break;
+	//					case 0x0001: last_user_word_mask &= 0x7f; user_data_end_detected = 1; break;
+	//					default:
+	//						last_user_byte_lane = (len_type - 3) % 8;
+	//						break;
+	//					}
+					}
+				} else if (is_len(len_type)) {
+					if (frm_cnt == last_user_word_pos) {
+						last_word = cur;
+						user_data_end_detected = 1;
+					}
+				}
+            }
+
+    		if (!user_data_end_detected) {
     			m_axis.write((t_axis){cur.rxd, 0xff, 0, 0});
     			frm_cnt++;
     		}
