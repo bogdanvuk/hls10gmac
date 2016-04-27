@@ -17,45 +17,9 @@ static ap_shift_reg<t_s_xgmii, 5> pipeline;
 
 #define SFD_CHAR      0xd5
 
-//void receive(
-//             hls::stream<t_s_xgmii> &s_xgmii,
-//             hls::stream<t_axis> &m_axis,
-//             t_rx_status* rx_status
-//             )
-//{
-//	t_s_xgmii din;
-//	t_s_xgmii cur = {0, 0};
-//	t_s_xgmii precur = {0, 0};
-//	MAIN: while (1) {
-//		if (!s_xgmii.read_nb(din)) return;
-//		cur = precur;
-//		precur = pipeline.shift(din);
-//		m_axis.write((t_axis){cur.rxd, 0xff, 0, 0});
-//		*rx_status = (t_rx_status) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-////		cur = precur;
-//
-//
-//		IDLE_AND_PREAMBLE: while (!((cur.rxc == 0x01) && (cur.rxd == 0xd5555555555555fb))) {
-//		#pragma HLS LATENCY max=0 min=0
-//		            if (!s_xgmii.read_nb(din)) return;
-//		            cur = precur;
-//		            precur = pipeline.shift(din);
-//		            m_axis.write((t_axis){cur.rxd, 0xff, 0, 0});
-////
-//		            //printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
-//		        }
-//
-//	}
-//
-//
-//}
-
-unsigned char reverse(unsigned char b) {
-   b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
-   b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
-   b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
-   return b;
-}
+#define replace_byte(w, b, pos) ((w) & (~(0xffL << (pos)*8))) | ((((ap_uint<64>) b) & 0xff) << (pos)*8)
+#define wbit(w, pos) (((w) >> (pos)) & 0x1)
+#define wbyte(w, pos) (((w) >> (8*pos)) & 0xff)
 
 void receive(
              hls::stream<t_s_xgmii> &s_xgmii,
@@ -78,10 +42,9 @@ void receive(
 	t_s_xgmii precur = {0, 0};
     t_s_xgmii last_word;
     ap_uint<8> last_data_mask = 0x00;
-    ap_uint<8> crc_data_mask = 0x00;
+    ap_uint<8> crc_field_mask = 0x00;
 
  MAIN: while (1) {
-        //#pragma HLS PIPELINE rewind
 
      if (last_data_mask) {
     	int fcs_err = (crc_state != 0xDEBB20E3);
@@ -148,9 +111,9 @@ void receive(
             if (!last) {
                 if (cur.rxc != 0x00) {
                     switch(cur.rxc) {
-            		case 0xe0 : last_data_mask = 0x01; crc_data_mask = 0x1e; break;
-            		case 0xc0 : last_data_mask = 0x03; crc_data_mask = 0x3c; break;
-            		case 0x80 : last_data_mask = 0x07; crc_data_mask = 0x78; break;
+            		case 0xe0 : last_data_mask = 0x01; crc_field_mask = 0x1e; break;
+            		case 0xc0 : last_data_mask = 0x03; crc_field_mask = 0x3c; break;
+            		case 0x80 : last_data_mask = 0x07; crc_field_mask = 0x78; break;
             		default: last_data_mask = 0x00; break;
                     }
                     frame_end_detected = 1;
@@ -159,17 +122,20 @@ void receive(
                 } else if ((precur.rxc != 0x00) && ((ap_uint<8>) ~precur.rxc <= 0x0f)) {
                     switch(precur.rxc) {
             		case 0xf0 : last_data_mask = 0xff; break;
-            		case 0xf8 : last_data_mask = 0x7f; break;
-            		case 0xfc : last_data_mask = 0x3f; break;
-            		case 0xfe : last_data_mask = 0x1f; break;
-            		case 0xff : last_data_mask = 0x0f; frame_end_detected = 1; break;
+            		case 0xf8 : last_data_mask = 0x7f; crc_field_mask = 0x80; break;
+            		case 0xfc : last_data_mask = 0x3f; crc_field_mask = 0xc0; break;
+            		case 0xfe : last_data_mask = 0x1f; crc_field_mask = 0xe0; break;
+            		case 0xff : last_data_mask = 0x0f; crc_field_mask = 0xf0; frame_end_detected = 1; break;
             		default: last_data_mask = 0x00; break;
                     }
                     last_word = cur;
                     last = 1;
+                } else {
+                	crc_field_mask = 0x00;
                 }
             } else {
                 frame_end_detected = 1;
+                crc_field_mask = 0xff;
             }
 
     		if (!last) {
@@ -180,38 +146,23 @@ void receive(
     		ap_uint<64> crc_data = 0;
     		CRC_MASK_CALC: for (i = 0; i < 8; i++) {
 #pragma HLS LOOP unroll
-    			if (!(cur.rxc & (1 << i))) {
-    				ap_uint<8> d = cur.rxd >> (8*i); //reverse(cur.rxd >> (8*i));
-    				if (crc_data_mask & (1 << i)) {
-    					crc_data |= ((ap_uint<64>) (~d & 0xff) << (8*i));
-    				} else {
-    					crc_data |= ((ap_uint<64>) d << (8*i));
+    			if (!wbit(cur.rxc, i)) {
+    				ap_uint<8> d = wbyte(cur.rxd, i);
+    				if (wbit(crc_field_mask,i)) {
+                        d = ~d;
     				}
+
+                    crc_data = replace_byte(crc_data, d, i);
     			}
     		}
 
     		crc32(crc_data, &crc_state);
-    		printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
+    		printf("RXD 0x%016lx, RXC 0x%02x, CRC_DATA 0x%016lx, crc_field_mask 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_data.to_long(), crc_field_mask.to_int(), crc_state.to_int(), frame_end_detected);
+    		//printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
 
     		cur = precur;
             if (!s_xgmii.read_nb(precur)) return;
-//            cur = precur;
-//            precur = pipeline.shift(din);
-
-
-            //            printf("Data 0x%x, FCS 0x%x\n", cur.rxd.to_int(), ~crc_state.to_int()); \
-            //if (!gmii_input(s_xgmii, din, cur, pipeline, &empty)) goto FRAME_END;
         } while(!frame_end_detected);
 
-//		cur = precur;
-//        if (!s_xgmii.read_nb(precur)) return;
-
-		/*
-
-          *rx_status = (t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over};
-          m_axis.write((t_axis){last.rxd, !good, 1});
-          if (!s_xgmii.read_nb(din)) return;
-          cur = pipeline.shift(din);
-        */
     }
 }
