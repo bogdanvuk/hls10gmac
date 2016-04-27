@@ -49,6 +49,14 @@ static ap_shift_reg<t_s_xgmii, 5> pipeline;
 //
 //
 //}
+
+unsigned char reverse(unsigned char b) {
+   b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+   b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+   b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+   return b;
+}
+
 void receive(
              hls::stream<t_s_xgmii> &s_xgmii,
              hls::stream<t_axis> &m_axis,
@@ -70,6 +78,7 @@ void receive(
 	t_s_xgmii precur = {0, 0};
     t_s_xgmii last_word;
     ap_uint<8> last_data_mask = 0x00;
+    ap_uint<8> crc_data_mask = 0x00;
 
  MAIN: while (1) {
         //#pragma HLS PIPELINE rewind
@@ -139,9 +148,9 @@ void receive(
             if (!last) {
                 if (cur.rxc != 0x00) {
                     switch(cur.rxc) {
-            		case 0xe0 : last_data_mask = 0x01; break;
-            		case 0xc0 : last_data_mask = 0x03; break;
-            		case 0x80 : last_data_mask = 0x07; break;
+            		case 0xe0 : last_data_mask = 0x01; crc_data_mask = 0x1e; break;
+            		case 0xc0 : last_data_mask = 0x03; crc_data_mask = 0x3c; break;
+            		case 0x80 : last_data_mask = 0x07; crc_data_mask = 0x78; break;
             		default: last_data_mask = 0x00; break;
                     }
                     frame_end_detected = 1;
@@ -168,16 +177,21 @@ void receive(
     			frm_cnt++;
     		}
 
-    		ap_uint<64> crc_mask = 0;
+    		ap_uint<64> crc_data = 0;
     		CRC_MASK_CALC: for (i = 0; i < 8; i++) {
 #pragma HLS LOOP unroll
     			if (!(cur.rxc & (1 << i))) {
-    				crc_mask |= ((ap_uint<64>) 0xff << (8*i));
+    				ap_uint<8> d = cur.rxd >> (8*i); //reverse(cur.rxd >> (8*i));
+    				if (crc_data_mask & (1 << i)) {
+    					crc_data |= ((ap_uint<64>) (~d & 0xff) << (8*i));
+    				} else {
+    					crc_data |= ((ap_uint<64>) d << (8*i));
+    				}
     			}
     		}
 
-    		crc32(cur.rxd, ~cur.rxc, &crc_state);
-    		printf("RXD 0x%016lx, RXC 0x%02x, CRC_MASK 0x%016lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_mask.to_long(), frame_end_detected);
+    		crc32(crc_data, &crc_state);
+    		printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
 
     		cur = precur;
             if (!s_xgmii.read_nb(precur)) return;
