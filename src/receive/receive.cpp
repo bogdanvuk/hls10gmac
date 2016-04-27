@@ -143,18 +143,6 @@ void receive(
 							user_data_end_detected = 1;
 							last_word = cur;
 						}
-
-						// Special case for the first two user data bytes which are
-						// contained in the same word as LENGTH/TYPE field. The mask
-						// is and-ed with previous value, since it was maybe already
-						// setup by the end-of-frame detection unit.
-	//					switch(len_type) {
-	//					case 0x0000: last_user_byte_lane = ; user_data_end_detected = 1; break;
-	//					case 0x0001: last_user_word_mask &= 0x7f; user_data_end_detected = 1; break;
-	//					default:
-	//						last_user_byte_lane = (len_type - 3) % 8;
-	//						break;
-	//					}
 					}
 				} else if (is_len(len_type)) {
 					if (frm_cnt == last_user_word_pos) {
