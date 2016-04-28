@@ -17,15 +17,17 @@
 void receive(
              hls::stream<t_s_xgmii> &s_xgmii,
              hls::stream<t_axis> &m_axis,
-             t_rx_status* rx_status
+             hls::stream<t_rx_status> &rx_status
              )
 {
+#ifdef RELEASE
+#pragma HLS interface ap_ctrl_none port=return
+#pragma HLS data_pack variable=s_xgmii
+#endif
 
-    //#pragma HLS interface ap_ctrl_none port=return
-    //#pragma HLS data_pack variable=s_xgmii
 #pragma HLS INTERFACE axis port=m_axis
 #pragma HLS data_pack variable=rx_status
-#pragma HLS INTERFACE ap_ovld port=rx_status
+
     int i;
     t_s_xgmii cur = {0, 0};
     t_s_xgmii precur = {0, 0};
@@ -59,7 +61,7 @@ void receive(
             int good = !(fcs_err | len_err | data_err | under | over);
 
             m_axis.write((t_axis){last_word.rxd, mask_up_to_bit(8, last_user_byte_lane), !good, 1});
-            *rx_status = (t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over};
+            rx_status.write((t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over});
         }
 
         cur = precur;
@@ -162,7 +164,7 @@ void receive(
                 }
             }
 
-            crc32(crc_data, &crc_state);
+            crc32<ap_uint<64>>(crc_data, &crc_state);
             // printf("RXD 0x%016lx, RXC 0x%02x, CRC_DATA 0x%016lx, crc_field_mask 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_data.to_long(), crc_field_mask.to_int(), crc_state.to_int(), frame_end_detected);
             //// printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
 

@@ -61,7 +61,7 @@ int main()
     hls::stream<t_axis> s_axis;
     hls::stream<t_s_xgmii> xgmii;
     int correct_frames = 0;
-    t_rx_status rx_status = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    hls::stream<t_rx_status> rx_status_stream;
 
     for (j = 0; j < FRAMES_CNT; j++) {
     	i = 0;
@@ -96,7 +96,7 @@ int main()
         xgmii.write((t_s_xgmii) {0x0707070707070707, 0xff});
     }
 
-    receive(xgmii, s_axis, &rx_status);
+    receive(xgmii, s_axis, rx_status_stream);
 
     printf("*****************************************************************\n");
     printf("RECEIVED FRAME %d\n", j);
@@ -106,7 +106,7 @@ int main()
         t_axis din=s_axis.read();
         printf("DATA 0x%016lx, KEEP 0x%02x, LAST %d, USER %d\n", din.data.to_long(), din.keep.to_int(), din.last.to_int(), din.user.to_int());
         if (din.last) {
-
+        	t_rx_status rx_status = rx_status_stream.read();
             if((!m_axis.user) && (!rx_status.fcs_err) && (!rx_status.len_err)){
                 correct_frames++;
             }

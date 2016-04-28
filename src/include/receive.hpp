@@ -23,6 +23,6 @@ typedef struct {
 	ap_uint<1>      over;
 }t_rx_status;
 
-void receive(hls::stream<t_s_xgmii> &s_xgmii, hls::stream<t_axis> &m_axis, t_rx_status* rx_status);
+void receive(hls::stream<t_s_xgmii> &s_xgmii, hls::stream<t_axis> &m_axis, hls::stream<t_rx_status> &rx_status);
 
 #endif
