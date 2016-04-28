@@ -4,14 +4,6 @@
 
 #include <stdio.h>
 
-ap_uint<32> crc_state = 0xffffffff;
-ap_uint<16> frm_cnt = 0;
-ap_uint<16> usr_cnt = 0;
-int data_err = 0;
-ap_uint<16> len_type = 0xffff;
-
-static ap_shift_reg<t_s_xgmii, 5> pipeline;
-
 #define is_type(x) ((x) >= 0x0600)
 #define is_len(x) ((x) <= 0x05DC)
 
@@ -35,64 +27,64 @@ void receive(
 #pragma HLS data_pack variable=rx_status
 #pragma HLS INTERFACE ap_ovld port=rx_status
     int i;
-    t_s_xgmii din;
-    t_s_xgmii ignore;
-//    t_s_xgmii last;
-    int output_en;
-	t_s_xgmii cur = {0, 0};
-	t_s_xgmii precur = {0, 0};
+    t_s_xgmii cur = {0, 0};
+    t_s_xgmii precur = {0, 0};
     t_s_xgmii last_word;
-    ap_uint<8> last_user_word_mask = 0x00;
-    ap_uint<8> crc_field_mask = 0x00;
+    ap_uint<32> crc_state = 0xffffffff;
+    ap_uint<16> frm_cnt = 0;
+    int data_err = 0;
+    ap_uint<16> len_type = 0xffff;
+    int last_user_byte_lane_before_frame_end;
+    int user_data_end_detected = 0;
     int last_user_word_pos;
     ap_uint<3> last_user_byte_lane;
-    int frame_end_detected = 0;
-    int user_data_end_detected = 0;
-	int last_user_byte_lane_before_frame_end;
+
  MAIN: while (1) {
 
-     if (user_data_end_detected) {
-    	int fcs_err = (crc_state != 0x00000000);
-		int len_err = 0;
-		int frm_byte_cnt = frm_cnt*8 + last_user_byte_lane_before_frame_end + 1 + 4;
-		int under = (frm_byte_cnt < 64);
-		int over = (frm_byte_cnt > 1500);
+        if (user_data_end_detected) {
+            int fcs_err = (crc_state != 0x00000000);
+            int len_err = 0;
+            int frm_byte_cnt = frm_cnt*8 + last_user_byte_lane_before_frame_end + 1 + 4;
+            int under = (frm_byte_cnt < 64);
+            int over = (frm_byte_cnt > 1500);
 
-		if (is_len(len_type)) {
-			len_err = (len_type != ((last_user_word_pos - 2) * 8 + 2 + last_user_byte_lane + 1));
-		}
+            if (is_len(len_type)) {
+                if (len_type > 2) {
+                    len_err = (len_type != ((last_user_word_pos - 2) * 8 + 2 + last_user_byte_lane + 1));
+                } else {
+                    len_err = (len_type != ((last_user_word_pos - 2) * 8 + 2 + 8 - (last_user_byte_lane + 1)));
+                }
+            }
 
-		int good = !(fcs_err | len_err | data_err | under | over);
+            int good = !(fcs_err | len_err | data_err | under | over);
 
-		m_axis.write((t_axis){last_word.rxd, mask_up_to_bit(8, last_user_byte_lane), !good, 1});
-		*rx_status = (t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over};
-     }
+            m_axis.write((t_axis){last_word.rxd, mask_up_to_bit(8, last_user_byte_lane), !good, 1});
+            *rx_status = (t_rx_status) {frm_cnt, good, 0, 0, under, len_err, fcs_err, data_err, 0, over};
+        }
 
-     cur = precur;
-     if (!s_xgmii.read_nb(precur)) return;
+        cur = precur;
+        if (!s_xgmii.read_nb(precur)) return;
 
-	 frm_cnt = 0;
-	 output_en = 1;
-	 crc_state = 0xffffffff;
-	 len_type = 0xffff;
-	 usr_cnt = 0;
+        frm_cnt = 0;
+        crc_state = 0xffffffff;
+        len_type = 0xffff;
 
     IDLE_AND_PREAMBLE: while (!((cur.rxc == 0x01) && (cur.rxd == 0xd5555555555555fb))) {
 #pragma HLS LATENCY max=0 min=0
     		cur = precur;
     		if (!s_xgmii.read_nb(precur)) return;
-            printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
+            // printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
         }
 
 		cur = precur;
 		if (!s_xgmii.read_nb(precur)) return;
-        printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
+        // printf("RXD 0x%016lx, RXC 0x%02x\n", cur.rxd.to_long(), cur.rxc.to_int());
 
-        frame_end_detected = 0;
         user_data_end_detected = 0;
-        last_user_word_mask = 0xff;
+        int frame_end_detected = 0;
     USER_DATA: do {
 #pragma HLS LATENCY max=0 min=0
+            ap_uint<8> crc_field_mask;
     		// END-OF-FRAME detection
             if (cur.rxc != 0x00) {
                 switch(cur.rxc) {
@@ -126,55 +118,55 @@ void receive(
 
             // END-OF-USER-DATA detection
             if (!user_data_end_detected) {
-				if (frm_cnt == 1) {
-					len_type = ((ap_uint<16>) wbyte(cur.rxd, 4) << 8) | wbyte(cur.rxd, 5);
-					if (is_len(len_type)) {
-						// Calculate the position of the last word within the frame
-						// which contains valid user data (based on LENGTH/TYPE field
-						// value. -3 is subtracted before division because first two
-						// bytes of user data are not word aligned, and 1 is subtracted
-						// additionally since we want to find out the last word that
-						// still contains data, not the number of user data words. +2
-						// since first word aligned user data byte starts at word #2.
-						last_user_word_pos = (len_type - 3) / 8 + 2;
-						last_user_byte_lane = (len_type - 3) % 8;
+                if (frm_cnt == 1) {
+                    len_type = ((ap_uint<16>) wbyte(cur.rxd, 4) << 8) | wbyte(cur.rxd, 5);
+                    if (is_len(len_type)) {
+                        // Calculate the position of the last word within the frame
+                        // which contains valid user data (based on LENGTH/TYPE field
+                        // value. -3 is subtracted before division because first two
+                        // bytes of user data are not word aligned, and 1 is subtracted
+                        // additionally since we want to find out the last word that
+                        // still contains data, not the number of user data words. +2
+                        // since first word aligned user data byte starts at word #2.
+                        last_user_word_pos = (len_type - 3) / 8 + 2;
+                        last_user_byte_lane = (len_type - 3) % 8;
 
-						if (len_type <= 2) {
-							user_data_end_detected = 1;
-							last_word = cur;
-						}
-					}
-				} else if (is_len(len_type)) {
-					if (frm_cnt == last_user_word_pos) {
-						last_word = cur;
-						user_data_end_detected = 1;
-					}
-				}
+                        if (len_type <= 2) {
+                            user_data_end_detected = 1;
+                            last_word = cur;
+                        }
+                    }
+                } else if (is_len(len_type)) {
+                    if (frm_cnt == last_user_word_pos) {
+                        last_word = cur;
+                        user_data_end_detected = 1;
+                    }
+                }
             }
 
-    		if (!user_data_end_detected) {
-    			m_axis.write((t_axis){cur.rxd, 0xff, 0, 0});
-    			frm_cnt++;
-    		}
+            if (!user_data_end_detected) {
+                m_axis.write((t_axis){cur.rxd, 0xff, 0, 0});
+                frm_cnt++;
+            }
 
-    		ap_uint<64> crc_data = 0;
-    		CRC_MASK_CALC: for (i = 0; i < 8; i++) {
+            ap_uint<64> crc_data = 0;
+        CRC_MASK_CALC: for (i = 0; i < 8; i++) {
 #pragma HLS LOOP unroll
-    			if (!wbit(cur.rxc, i)) {
-    				ap_uint<8> d = wbyte(cur.rxd, i);
-    				if (wbit(crc_field_mask,i)) {
+                if (!wbit(cur.rxc, i)) {
+                    ap_uint<8> d = wbyte(cur.rxd, i);
+                    if (wbit(crc_field_mask,i)) {
                         d = ~d;
-    				}
+                    }
 
                     crc_data = replace_byte(crc_data, d, i);
-    			}
-    		}
+                }
+            }
 
-    		crc32(crc_data, &crc_state);
-    		printf("RXD 0x%016lx, RXC 0x%02x, CRC_DATA 0x%016lx, crc_field_mask 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_data.to_long(), crc_field_mask.to_int(), crc_state.to_int(), frame_end_detected);
-    		//printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
+            crc32(crc_data, &crc_state);
+            // printf("RXD 0x%016lx, RXC 0x%02x, CRC_DATA 0x%016lx, crc_field_mask 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_data.to_long(), crc_field_mask.to_int(), crc_state.to_int(), frame_end_detected);
+            //// printf("RXD 0x%016lx, RXC 0x%02x, CRC_STATE 0x%08lx, FRMEND %d\n", cur.rxd.to_long(), cur.rxc.to_int(), crc_state.to_int(), frame_end_detected);
 
-    		cur = precur;
+            cur = precur;
             if (!s_xgmii.read_nb(precur)) return;
         } while(!frame_end_detected);
 

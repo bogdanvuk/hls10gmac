@@ -90,16 +90,16 @@ int main()
         } else {
         	xgmii.write((t_s_xgmii) {0x0707070707070707, 0xff});
         }
-    }
 
-    for (i = 0; i < 5; i++) {
-    	xgmii.write((t_s_xgmii) {0x0707070707070707, 0xff});
+    }
+    for (j = 0; j < 5; j++) {
+        xgmii.write((t_s_xgmii) {0x0707070707070707, 0xff});
     }
 
     receive(xgmii, s_axis, &rx_status);
 
     printf("*****************************************************************\n");
-    printf("RECEIVED FRAMES\n");
+    printf("RECEIVED FRAME %d\n", j);
     printf("*****************************************************************\n");
     t_axis m_axis;
     while (!s_axis.empty()) {
@@ -112,14 +112,14 @@ int main()
             }
             printf("*****************************************************************\n");
             printf("Frame status: count=%d, good=%d, under=%d, len_err=%d, fcs_err=%d, data_err=%d, over=%d\n",
-                      rx_status.count.to_int(),
-                                      rx_status.good.to_int(),
-                                      rx_status.under.to_int(),
-                                      rx_status.len_err.to_int(),
-                                      rx_status.fcs_err.to_int(),
-                                      rx_status.data_err.to_int(),
-                                      rx_status.over.to_int()
-                );
+                   rx_status.count.to_int(),
+                   rx_status.good.to_int(),
+                   rx_status.under.to_int(),
+                   rx_status.len_err.to_int(),
+                   rx_status.fcs_err.to_int(),
+                   rx_status.data_err.to_int(),
+                   rx_status.over.to_int()
+                   );
             printf("*****************************************************************\n");
         }
     }
